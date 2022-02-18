@@ -11,6 +11,7 @@ require (
 	github.com/fumiama/go-hide-param v0.1.4
 	github.com/gabriel-vasile/mimetype v1.4.0
 	github.com/gocq/qrcode v0.0.0-20211114040510-366b953fcd98
+	github.com/gorilla/websocket v1.5.0
 	github.com/kardianos/osext v0.0.0-20190222173326-2bc1f35cddc0
 	github.com/klauspost/compress v1.13.6
 	github.com/lestrrat-go/file-rotatelogs v2.4.0+incompatible
