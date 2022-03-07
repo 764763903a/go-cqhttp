@@ -5,9 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
-	"path"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -131,8 +129,24 @@ func (bot *CQBot) OnEventPush(f func(e *Event)) {
 	bot.lock.Unlock()
 }
 
-// UploadLocalImageAsGroup 上传本地图片至群聊
-func (bot *CQBot) UploadLocalImageAsGroup(groupCode int64, img *LocalImageElement) (i *message.GroupImageElement, err error) {
+type worker struct {
+	wg sync.WaitGroup
+}
+
+func (w *worker) do(f func()) {
+	w.wg.Add(1)
+	go func() {
+		defer w.wg.Done()
+		f()
+	}()
+}
+
+func (w *worker) wait() {
+	w.wg.Wait()
+}
+
+// uploadLocalImage 上传本地图片
+func (bot *CQBot) uploadLocalImage(target message.Source, img *LocalImageElement) (message.IMessageElement, error) {
 	if img.File != "" {
 		f, err := os.Open(img.File)
 		if err != nil {
@@ -144,89 +158,108 @@ func (bot *CQBot) UploadLocalImageAsGroup(groupCode int64, img *LocalImageElemen
 	if lawful, mime := base.IsLawfulImage(img.Stream); !lawful {
 		return nil, errors.New("image type error: " + mime)
 	}
-	i, err = bot.Client.UploadGroupImage(groupCode, img.Stream)
-	if i != nil {
+	i, err := bot.Client.UploadImage(target, img.Stream, 4)
+	if err != nil {
+		return nil, err
+	}
+	switch i := i.(type) {
+	case *message.GroupImageElement:
 		i.Flash = img.Flash
 		i.EffectID = img.EffectID
+	case *message.FriendImageElement:
+		i.Flash = img.Flash
 	}
-	return
+	return i, err
 }
 
-// UploadLocalVideo 上传本地短视频至群聊
-func (bot *CQBot) UploadLocalVideo(target int64, v *LocalVideoElement) (*message.ShortVideoElement, error) {
+// uploadLocalVideo 上传本地短视频至群聊
+func (bot *CQBot) uploadLocalVideo(target message.Source, v *LocalVideoElement) (*message.ShortVideoElement, error) {
 	video, err := os.Open(v.File)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = video.Close() }()
-	hash, _ := utils.ComputeMd5AndLength(io.MultiReader(video, v.thumb))
-	cacheFile := path.Join(global.CachePath, hex.EncodeToString(hash)+".cache")
-	_, _ = video.Seek(0, io.SeekStart)
-	_, _ = v.thumb.Seek(0, io.SeekStart)
-	return bot.Client.UploadGroupShortVideo(target, video, v.thumb, cacheFile)
+	return bot.Client.UploadShortVideo(target, video, v.thumb, 4)
 }
 
-// UploadLocalImageAsPrivate 上传本地图片至私聊
-func (bot *CQBot) UploadLocalImageAsPrivate(userID int64, img *LocalImageElement) (i *message.FriendImageElement, err error) {
-	if img.File != "" {
-		f, err := os.Open(img.File)
-		if err != nil {
-			return nil, errors.Wrap(err, "open image error")
+func removeLocalElement(elements []message.IMessageElement) []message.IMessageElement {
+	var j int
+	for i, e := range elements {
+		switch e.(type) {
+		case *LocalImageElement, *LocalVideoElement:
+		case *message.VoiceElement: // 未上传的语音消息， 也删除
+		case nil:
+		default:
+			if j < i {
+				elements[j] = e
+			}
+			j++
 		}
-		defer func() { _ = f.Close() }()
-		img.Stream = f
 	}
-	if lawful, mime := base.IsLawfulImage(img.Stream); !lawful {
-		return nil, errors.New("image type error: " + mime)
-	}
-	i, err = bot.Client.UploadPrivateImage(userID, img.Stream)
-	if i != nil {
-		i.Flash = img.Flash
-	}
-	return
+	return elements[:j]
 }
 
-// UploadLocalImageAsGuildChannel 上传本地图片至频道
-func (bot *CQBot) UploadLocalImageAsGuildChannel(guildID, channelID uint64, img *LocalImageElement) (*message.GuildImageElement, error) {
-	if img.File != "" {
-		f, err := os.Open(img.File)
-		if err != nil {
-			return nil, errors.Wrap(err, "open image error")
+const uploadFailedTemplate = "警告: %s %d %s上传失败: %v"
+
+func (bot *CQBot) uploadMedia(target message.Source, elements []message.IMessageElement) []message.IMessageElement {
+	var w worker
+	var source string
+	switch target.SourceType { // nolint:exhaustive
+	case message.SourceGroup:
+		source = "群"
+	case message.SourcePrivate:
+		source = "私聊"
+	case message.SourceGuildChannel:
+		source = "频道"
+	}
+
+	for i, m := range elements {
+		p := &elements[i]
+		switch e := m.(type) {
+		case *LocalImageElement:
+			w.do(func() {
+				m, err := bot.uploadLocalImage(target, e)
+				if err != nil {
+					log.Warnf(uploadFailedTemplate, source, target.PrimaryID, "图片", err)
+				} else {
+					*p = m
+				}
+			})
+		case *message.VoiceElement:
+			w.do(func() {
+				m, err := bot.Client.UploadVoice(target, bytes.NewReader(e.Data))
+				if err != nil {
+					log.Warnf(uploadFailedTemplate, source, target.PrimaryID, "语音", err)
+				} else {
+					*p = m
+				}
+			})
+		case *LocalVideoElement:
+			w.do(func() {
+				m, err := bot.uploadLocalVideo(target, e)
+				if err != nil {
+					log.Warnf(uploadFailedTemplate, source, target.PrimaryID, "视频", err)
+				} else {
+					*p = m
+				}
+			})
 		}
-		defer func() { _ = f.Close() }()
-		img.Stream = f
 	}
-	if lawful, mime := base.IsLawfulImage(img.Stream); !lawful {
-		return nil, errors.New("image type error: " + mime)
-	}
-	return bot.Client.GuildService.UploadGuildImage(guildID, channelID, img.Stream)
-}
-
-func (bot *CQBot) uploadGuildVideo(i *LocalVideoElement, guildID, channelID uint64) (*message.ShortVideoElement, error) {
-	video, err := os.Open(i.File)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = video.Close() }()
-	_, _ = video.Seek(0, io.SeekStart)
-	_, _ = i.thumb.Seek(0, io.SeekStart)
-	n, err := bot.Client.UploadGuildShortVideo(guildID, channelID, video, i.thumb)
-	return n, err
+	w.wait()
+	return removeLocalElement(elements)
 }
 
 // SendGroupMessage 发送群消息
 func (bot *CQBot) SendGroupMessage(groupID int64, m *message.SendingMessage) int32 {
 	newElem := make([]message.IMessageElement, 0, len(m.Elements))
 	group := bot.Client.FindGroup(groupID)
+	source := message.Source{
+		SourceType: message.SourceGroup,
+		PrimaryID:  groupID,
+	}
+	m.Elements = bot.uploadMedia(source, m.Elements)
 	for _, e := range m.Elements {
 		switch i := e.(type) {
-		case *LocalImageElement, *message.VoiceElement, *LocalVideoElement:
-			i, err := bot.uploadMedia(i, groupID, true)
-			if err != nil {
-				log.Warnf("警告: 群 %d 消息%s上传失败: %v", groupID, e.Type().String(), err)
-				continue
-			}
-			e = i
 		case *PokeElement:
 			if group != nil {
 				if mem := group.FindMember(i.Target); mem != nil {
@@ -265,15 +298,13 @@ func (bot *CQBot) SendGroupMessage(groupID int64, m *message.SendingMessage) int
 // SendPrivateMessage 发送私聊消息
 func (bot *CQBot) SendPrivateMessage(target int64, groupID int64, m *message.SendingMessage) int32 {
 	newElem := make([]message.IMessageElement, 0, len(m.Elements))
+	source := message.Source{
+		SourceType: message.SourcePrivate,
+		PrimaryID:  target,
+	}
+	m.Elements = bot.uploadMedia(source, m.Elements)
 	for _, e := range m.Elements {
 		switch i := e.(type) {
-		case *LocalImageElement, *message.VoiceElement, *LocalVideoElement:
-			i, err := bot.uploadMedia(i, target, false)
-			if err != nil {
-				log.Warnf("警告: 私聊 %d 消息%s上传失败: %v", target, e.Type().String(), err)
-				continue
-			}
-			e = i
 		case *PokeElement:
 			bot.Client.SendFriendPoke(i.Target)
 			return 0
@@ -362,29 +393,19 @@ func (bot *CQBot) SendPrivateMessage(target int64, groupID int64, m *message.Sen
 // SendGuildChannelMessage 发送频道消息
 func (bot *CQBot) SendGuildChannelMessage(guildID, channelID uint64, m *message.SendingMessage) string {
 	newElem := make([]message.IMessageElement, 0, len(m.Elements))
+	source := message.Source{
+		SourceType:  message.SourceGuildChannel,
+		PrimaryID:   int64(guildID),
+		SecondaryID: int64(channelID),
+	}
+	m.Elements = bot.uploadMedia(source, m.Elements)
 	for _, e := range m.Elements {
 		switch i := e.(type) {
-		case *LocalImageElement:
-			n, err := bot.UploadLocalImageAsGuildChannel(guildID, channelID, i)
-			if err != nil {
-				log.Warnf("警告: 频道 %d 消息%s上传失败: %v", channelID, e.Type().String(), err)
-				continue
-			}
-			e = n
-
-		case *LocalVideoElement:
-			n, err := bot.uploadGuildVideo(i, guildID, channelID)
-			if err != nil {
-				log.Warnf("警告: 频道 %d 消息%s上传失败: %v", channelID, e.Type().String(), err)
-				continue
-			}
-			e = n
-
 		case *message.MusicShareElement:
 			bot.Client.SendGuildMusicShare(guildID, channelID, i)
 			return "-1" // todo: fix this
 
-		case *LocalVoiceElement, *PokeElement:
+		case *message.VoiceElement, *PokeElement:
 			log.Warnf("警告: 频道暂不支持发送 %v 消息", i.Type().String())
 			continue
 		}
@@ -523,7 +544,7 @@ func (bot *CQBot) InsertTempMessage(target int64, m *message.TempMessage) int32 
 
 // InsertGuildChannelMessage 频道消息入数据库
 func (bot *CQBot) InsertGuildChannelMessage(m *message.GuildChannelMessage) string {
-	id := encodeGuildMessageID(m.GuildId, m.ChannelId, m.Id, MessageSourceGuildChannel)
+	id := encodeGuildMessageID(m.GuildId, m.ChannelId, m.Id, message.SourceGuildChannel)
 	msg := &db.StoredGuildChannelMessage{
 		ID: id,
 		Attribute: &db.StoredGuildMessageAttribute{
@@ -542,10 +563,6 @@ func (bot *CQBot) InsertGuildChannelMessage(m *message.GuildChannelMessage) stri
 		return ""
 	}
 	return msg.ID
-}
-
-// Release 释放Bot实例
-func (bot *CQBot) Release() {
 }
 
 func (bot *CQBot) dispatchEventMessage(m global.MSG) {
@@ -589,24 +606,6 @@ func formatMemberName(mem *client.GroupMemberInfo) string {
 	return fmt.Sprintf("%s(%d)", mem.DisplayName(), mem.Uin)
 }
 
-func (bot *CQBot) uploadMedia(raw message.IMessageElement, target int64, group bool) (message.IMessageElement, error) {
-	switch m := raw.(type) {
-	case *LocalImageElement:
-		if group {
-			return bot.UploadLocalImageAsGroup(target, m)
-		}
-		return bot.UploadLocalImageAsPrivate(target, m)
-	case *message.VoiceElement:
-		if group {
-			return bot.Client.UploadGroupPtt(target, bytes.NewReader(m.Data))
-		}
-		return bot.Client.UploadPrivatePtt(target, bytes.NewReader(m.Data))
-	case *LocalVideoElement:
-		return bot.UploadLocalVideo(target, m)
-	}
-	return nil, errors.New("unsupported message element type")
-}
-
 // encodeMessageID 临时先这样, 暂时用不上
 func encodeMessageID(target int64, seq int32) string {
 	return hex.EncodeToString(binary.NewWriterF(func(w *binary.Writer) {
@@ -618,7 +617,7 @@ func encodeMessageID(target int64, seq int32) string {
 // encodeGuildMessageID 将频道信息编码为字符串
 // 当信息来源为 Channel 时 primaryID 为 guildID , subID 为 channelID
 // 当信息来源为 Direct 时 primaryID 为 guildID , subID 为 tinyID
-func encodeGuildMessageID(primaryID, subID, seq uint64, source MessageSourceType) string {
+func encodeGuildMessageID(primaryID, subID, seq uint64, source message.SourceType) string {
 	return base64.StdEncoding.EncodeToString(binary.NewWriterF(func(w *binary.Writer) {
 		w.WriteByte(byte(source))
 		w.WriteUInt64(primaryID)
@@ -627,16 +626,16 @@ func encodeGuildMessageID(primaryID, subID, seq uint64, source MessageSourceType
 	}))
 }
 
-func decodeGuildMessageID(id string) (source *MessageSource, seq uint64) {
+func decodeGuildMessageID(id string) (source *message.Source, seq uint64) {
 	b, _ := base64.StdEncoding.DecodeString(id)
 	if len(b) < 25 {
 		return
 	}
 	r := binary.NewReader(b)
-	source = &MessageSource{
-		SourceType: MessageSourceType(r.ReadByte()),
-		PrimaryID:  uint64(r.ReadInt64()),
-		SubID:      uint64(r.ReadInt64()),
+	source = &message.Source{
+		SourceType:  message.SourceType(r.ReadByte()),
+		PrimaryID:   r.ReadInt64(),
+		SecondaryID: r.ReadInt64(),
 	}
 	seq = uint64(r.ReadInt64())
 	return
