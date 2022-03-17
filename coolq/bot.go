@@ -311,6 +311,7 @@ func (bot *CQBot) SendPrivateMessage(target int64, groupID int64, m *message.Sen
 			id = bot.InsertPrivateMessage(msg)
 		}
 	case ok || groupID != 0: // 临时会话
+		return -1
 		switch {
 		case groupID != 0 && bot.Client.FindGroup(groupID) == nil:
 			log.Errorf("错误: 找不到群(%v)", groupID)
