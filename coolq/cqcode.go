@@ -19,6 +19,7 @@ import (
 	"github.com/Mrs4s/MiraiGo/binary"
 	"github.com/Mrs4s/MiraiGo/message"
 	"github.com/Mrs4s/MiraiGo/utils"
+	b14 "github.com/fumiama/go-base16384"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 
@@ -92,9 +93,14 @@ func replyID(r *message.ReplyElement, source message.Source) int32 {
 	return db.ToGlobalID(id, seq)
 }
 
-// ToArrayMessage 将消息元素数组转为MSG数组以用于消息上报
-func ToArrayMessage(e []message.IMessageElement, source message.Source) (r []global.MSG) {
-	r = make([]global.MSG, 0, len(e))
+// toElements 将消息元素数组转为MSG数组以用于消息上报
+//
+// nolint:govet
+func toElements(e []message.IMessageElement, source message.Source) (r []cqcode.Element) {
+	type pair = cqcode.Pair // simplify code
+	type pairs = []pair
+
+	r = make([]cqcode.Element, 0, len(e))
 	m := &message.SendingMessage{Elements: e}
 	reply := m.FirstOrNil(func(e message.IMessageElement) bool {
 		_, ok := e.(*message.ReplyElement)
@@ -103,26 +109,24 @@ func ToArrayMessage(e []message.IMessageElement, source message.Source) (r []glo
 	if reply != nil && source.SourceType&(message.SourceGroup|message.SourcePrivate) != 0 {
 		replyElem := reply.(*message.ReplyElement)
 		id := replyID(replyElem, source)
-		if base.ExtraReplyData {
-			r = append(r, global.MSG{
-				"type": "reply",
-				"data": map[string]string{
-					"id":   strconv.FormatInt(int64(id), 10),
-					"seq":  strconv.FormatInt(int64(replyElem.ReplySeq), 10),
-					"qq":   strconv.FormatInt(replyElem.Sender, 10),
-					"time": strconv.FormatInt(int64(replyElem.Time), 10),
-					"text": ToStringMessage(replyElem.Elements, source),
-				},
-			})
-		} else {
-			r = append(r, global.MSG{
-				"type": "reply",
-				"data": map[string]string{"id": strconv.FormatInt(int64(id), 10)},
-			})
+		elem := cqcode.Element{
+			Type: "reply",
+			Data: pairs{
+				{K: "id", V: strconv.FormatInt(int64(id), 10)},
+			},
 		}
+		if base.ExtraReplyData {
+			elem.Data = append(elem.Data,
+				pair{K: "seq", V: strconv.FormatInt(int64(replyElem.ReplySeq), 10)},
+				pair{K: "qq", V: strconv.FormatInt(replyElem.Sender, 10)},
+				pair{K: "time", V: strconv.FormatInt(int64(replyElem.Time), 10)},
+				pair{K: "text", V: toStringMessage(replyElem.Elements, source)},
+			)
+		}
+		r = append(r, elem)
 	}
 	for i, elem := range e {
-		var m global.MSG
+		var m cqcode.Element
 		switch o := elem.(type) {
 		case *message.ReplyElement:
 			if base.RemoveReplyAt && i+1 < len(e) {
@@ -131,238 +135,152 @@ func ToArrayMessage(e []message.IMessageElement, source message.Source) (r []glo
 					e[i+1] = nil
 				}
 			}
+			continue
 		case *message.TextElement:
-			m = global.MSG{
-				"type": "text",
-				"data": map[string]string{"text": o.Content},
+			m = cqcode.Element{
+				Type: "text",
+				Data: pairs{
+					{K: "text", V: o.Content},
+				},
 			}
 		case *message.LightAppElement:
-			m = global.MSG{
-				"type": "json",
-				"data": map[string]string{"data": o.Content},
+			m = cqcode.Element{
+				Type: "json",
+				Data: pairs{
+					{K: "data", V: o.Content},
+				},
 			}
 		case *message.AtElement:
-			if o.Target == 0 {
-				m = global.MSG{
-					"type": "at",
-					"data": map[string]string{"qq": "all"},
-				}
-			} else {
-				m = global.MSG{
-					"type": "at",
-					"data": map[string]string{"qq": strconv.FormatUint(uint64(o.Target), 10)},
-				}
+			target := "all"
+			if o.Target != 0 {
+				target = strconv.FormatUint(uint64(o.Target), 10)
+			}
+			m = cqcode.Element{
+				Type: "at",
+				Data: pairs{
+					{K: "qq", V: target},
+				},
 			}
 		case *message.RedBagElement:
-			m = global.MSG{
-				"type": "redbag",
-				"data": map[string]string{"title": o.Title},
+			m = cqcode.Element{
+				Type: "redbag",
+				Data: pairs{
+					{K: "title", V: o.Title},
+				},
 			}
 		case *message.ForwardElement:
-			m = global.MSG{
-				"type": "forward",
-				"data": map[string]string{"id": o.ResId},
+			m = cqcode.Element{
+				Type: "forward",
+				Data: pairs{
+					{K: "id", V: o.ResId},
+				},
 			}
 		case *message.FaceElement:
-			m = global.MSG{
-				"type": "face",
-				"data": map[string]string{"id": strconv.FormatInt(int64(o.Index), 10)},
+			m = cqcode.Element{
+				Type: "face",
+				Data: pairs{
+					{K: "id", V: strconv.FormatInt(int64(o.Index), 10)},
+				},
 			}
 		case *message.VoiceElement:
-			m = global.MSG{
-				"type": "record",
-				"data": map[string]string{"file": o.Name, "url": o.Url},
+			m = cqcode.Element{
+				Type: "record",
+				Data: pairs{
+					{K: "file", V: o.Name},
+					{K: "url", V: o.Url},
+				},
 			}
 		case *message.ShortVideoElement:
-			m = global.MSG{
-				"type": "video",
-				"data": map[string]string{"file": o.Name, "url": o.Url},
+			m = cqcode.Element{
+				Type: "video",
+				Data: pairs{
+					{K: "file", V: o.Name},
+					{K: "url", V: o.Url},
+				},
 			}
 		case *message.GroupImageElement:
-			data := map[string]string{"file": hex.EncodeToString(o.Md5) + ".image", "url": o.Url, "subType": strconv.FormatInt(int64(o.ImageBizType), 10)}
+			data := pairs{
+				{K: "file", V: hex.EncodeToString(o.Md5) + ".image"},
+				{K: "subType", V: strconv.FormatInt(int64(o.ImageBizType), 10)},
+				{K: "url", V: o.Url},
+			}
 			switch {
 			case o.Flash:
-				data["type"] = "flash"
+				data = append(data, pair{K: "type", V: "flash"})
 			case o.EffectID != 0:
-				data["type"] = "show"
-				data["id"] = strconv.FormatInt(int64(o.EffectID), 10)
+				data = append(data, pair{K: "type", V: "show"})
+				data = append(data, pair{K: "id", V: strconv.FormatInt(int64(o.EffectID), 10)})
 			}
-			m = global.MSG{
-				"type": "image",
-				"data": data,
+			m = cqcode.Element{
+				Type: "image",
+				Data: data,
 			}
 		case *message.GuildImageElement:
-			data := map[string]string{"file": hex.EncodeToString(o.Md5) + ".image", "url": o.Url}
-			m = global.MSG{
-				"type": "image",
-				"data": data,
+			data := pairs{
+				{K: "file", V: hex.EncodeToString(o.Md5) + ".image"},
+				{K: "url", V: o.Url},
+			}
+			m = cqcode.Element{
+				Type: "image",
+				Data: data,
 			}
 		case *message.FriendImageElement:
-			data := map[string]string{"file": hex.EncodeToString(o.Md5) + ".image", "url": o.Url}
-			if o.Flash {
-				data["type"] = "flash"
+			data := pairs{
+				{K: "file", V: hex.EncodeToString(o.Md5) + ".image"},
+				{K: "url", V: o.Url},
 			}
-			m = global.MSG{
-				"type": "image",
-				"data": data,
+			if o.Flash {
+				data = append(data, pair{K: "type", V: "flash"})
+			}
+			m = cqcode.Element{
+				Type: "image",
+				Data: data,
 			}
 		case *message.DiceElement:
-			m = global.MSG{
-				"type": "dice",
-				"data": map[string]string{"value": fmt.Sprint(o.Value)},
+			m = cqcode.Element{
+				Type: "dice",
+				Data: pairs{
+					{K: "value", V: strconv.FormatInt(int64(o.Value), 10)},
+				},
+			}
+		case *message.FingerGuessingElement:
+			m = cqcode.Element{
+				Type: "rps",
+				Data: pairs{
+					{K: "value", V: strconv.FormatInt(int64(o.Value), 10)},
+				},
 			}
 		case *message.MarketFaceElement:
-			m = global.MSG{
-				"type": "text",
-				"data": map[string]string{"text": o.Name},
+			m = cqcode.Element{
+				Type: "text",
+				Data: pairs{
+					{K: "text", V: o.Name},
+				},
 			}
 		case *message.ServiceElement:
-			if isOk := strings.Contains(o.Content, "<?xml"); isOk {
-				m = global.MSG{
-					"type": "xml",
-					"data": map[string]string{"data": o.Content, "resid": strconv.FormatInt(int64(o.Id), 10)},
-				}
-			} else {
-				m = global.MSG{
-					"type": "json",
-					"data": map[string]string{"data": o.Content, "resid": strconv.FormatInt(int64(o.Id), 10)},
-				}
+			m = cqcode.Element{
+				Type: "xml",
+				Data: pairs{
+					{K: "data", V: o.Content},
+					{K: "resid", V: o.ResId},
+				},
+			}
+			if !strings.Contains(o.Content, "<?xml") {
+				m.Type = "json"
 			}
 		case *message.AnimatedSticker:
-			m = global.MSG{
-				"type": "face",
-				"data": map[string]string{"id": strconv.FormatInt(int64(o.ID), 10), "type": "sticker"},
+			m = cqcode.Element{
+				Type: "face",
+				Data: pairs{
+					{K: "id", V: strconv.FormatInt(int64(o.ID), 10)},
+					{K: "type", V: "sticker"},
+				},
 			}
 		default:
 			continue
 		}
-		if m != nil {
-			r = append(r, m)
-		}
+		r = append(r, m)
 	}
-	return
-}
-
-// ToStringMessage 将消息元素数组转为字符串以用于消息上报
-func ToStringMessage(e []message.IMessageElement, source message.Source, isRaw ...bool) (r string) {
-	sb := global.NewBuffer()
-	sb.Reset()
-	write := func(format string, a ...interface{}) {
-		_, _ = fmt.Fprintf(sb, format, a...)
-	}
-	ur := false
-	if len(isRaw) != 0 {
-		ur = isRaw[0]
-	}
-	// 方便
-	m := &message.SendingMessage{Elements: e}
-	reply := m.FirstOrNil(func(e message.IMessageElement) bool {
-		_, ok := e.(*message.ReplyElement)
-		return ok
-	})
-	if reply != nil && source.SourceType&(message.SourceGroup|message.SourcePrivate) != 0 {
-		replyElem := reply.(*message.ReplyElement)
-		id := replyID(replyElem, source)
-		if base.ExtraReplyData {
-			write("[CQ:reply,id=%d,seq=%d,qq=%d,time=%d,text=%s]",
-				id, replyElem.ReplySeq, replyElem.Sender, replyElem.Time,
-				cqcode.EscapeValue(ToStringMessage(replyElem.Elements, source)))
-		} else {
-			write("[CQ:reply,id=%d]", id)
-		}
-	}
-	for i, elem := range e {
-		switch o := elem.(type) {
-		case *message.ReplyElement:
-			if base.RemoveReplyAt && len(e) > i+1 {
-				elem, ok := e[i+1].(*message.AtElement)
-				if ok && elem.Target == o.Sender {
-					e[i+1] = nil
-				}
-			}
-		case *message.TextElement:
-			sb.WriteString(cqcode.EscapeText(o.Content))
-		case *message.AtElement:
-			if o.Target == 0 {
-				write("[CQ:at,qq=all]")
-				continue
-			}
-			write("[CQ:at,qq=%d]", uint64(o.Target))
-		case *message.RedBagElement:
-			write("[CQ:redbag,title=%s]", o.Title)
-		case *message.ForwardElement:
-			write("[CQ:forward,id=%s]", o.ResId)
-		case *message.FaceElement:
-			write(`[CQ:face,id=%d]`, o.Index)
-		case *message.VoiceElement:
-			if ur {
-				write(`[CQ:record,file=%s]`, o.Name)
-			} else {
-				write(`[CQ:record,file=%s,url=%s]`, o.Name, cqcode.EscapeValue(o.Url))
-			}
-		case *message.ShortVideoElement:
-			if ur {
-				write(`[CQ:video,file=%s]`, o.Name)
-			} else {
-				write(`[CQ:video,file=%s,url=%s]`, o.Name, cqcode.EscapeValue(o.Url))
-			}
-		case *message.GroupImageElement:
-			var arg string
-			if o.Flash {
-				arg = ",type=flash"
-			} else if o.EffectID != 0 {
-				arg = ",type=show,id=" + strconv.FormatInt(int64(o.EffectID), 10)
-			}
-			arg += ",subType=" + strconv.FormatInt(int64(o.ImageBizType), 10)
-			if ur {
-				write("[CQ:image,file=%s%s]", hex.EncodeToString(o.Md5)+".image", arg)
-			} else {
-				write("[CQ:image,file=%s,url=%s%s]", hex.EncodeToString(o.Md5)+".image", cqcode.EscapeValue(o.Url), arg)
-			}
-		case *message.FriendImageElement:
-			var arg string
-			if o.Flash {
-				arg = ",type=flash"
-			}
-			if ur {
-				write("[CQ:image,file=%s%s]", hex.EncodeToString(o.Md5)+".image", arg)
-			} else {
-				write("[CQ:image,file=%s,url=%s%s]", hex.EncodeToString(o.Md5)+".image", cqcode.EscapeValue(o.Url), arg)
-			}
-		case *LocalImageElement:
-			var arg string
-			if o.Flash {
-				arg = ",type=flash"
-			}
-			data, err := os.ReadFile(o.File)
-			if err == nil {
-				m := md5.Sum(data)
-				if ur {
-					write("[CQ:image,file=%s%s]", hex.EncodeToString(m[:])+".image", arg)
-				} else {
-					write("[CQ:image,file=%s,url=%s%s]", hex.EncodeToString(m[:])+".image", cqcode.EscapeValue(o.URL), arg)
-				}
-			}
-		case *message.GuildImageElement:
-			write("[CQ:image,file=%s,url=%s]", hex.EncodeToString(o.Md5)+".image", cqcode.EscapeValue(o.Url))
-		case *message.DiceElement:
-			write("[CQ:dice,value=%v]", o.Value)
-		case *message.MarketFaceElement:
-			sb.WriteString(o.Name)
-		case *message.ServiceElement:
-			if isOk := strings.Contains(o.Content, "<?xml"); isOk {
-				write(`[CQ:xml,data=%s,resid=%d]`, cqcode.EscapeValue(o.Content), o.Id)
-			} else {
-				write(`[CQ:json,data=%s,resid=%d]`, cqcode.EscapeValue(o.Content), o.Id)
-			}
-		case *message.LightAppElement:
-			write(`[CQ:json,data=%s]`, cqcode.EscapeValue(o.Content))
-		case *message.AnimatedSticker:
-			write(`[CQ:face,id=%d,type=sticker]`, o.ID)
-		}
-	}
-	r = sb.String() // 内部已拷贝
-	global.PutBuffer(sb)
 	return
 }
 
@@ -455,6 +373,8 @@ func ToMessageContent(e []message.IMessageElement) (r []global.MSG) {
 			}
 		case *message.DiceElement:
 			m = global.MSG{"type": "dice", "data": global.MSG{"value": o.Value}}
+		case *message.FingerGuessingElement:
+			m = global.MSG{"type": "rps", "data": global.MSG{"value": o.Value}}
 		case *message.MarketFaceElement:
 			m = global.MSG{"type": "text", "data": global.MSG{"text": o.Name}}
 		case *message.ServiceElement:
@@ -477,9 +397,7 @@ func ToMessageContent(e []message.IMessageElement) (r []global.MSG) {
 		default:
 			continue
 		}
-		if m != nil {
-			r = append(r, m)
-		}
+		r = append(r, m)
 	}
 	return
 }
@@ -917,9 +835,6 @@ func (bot *CQBot) ToElement(t string, d map[string]string, sourceType message.So
 	case "record":
 		f := d["file"]
 		data, err := global.FindFile(f, d["cache"], global.VoicePath)
-		if err == global.ErrSyntax {
-			data, err = global.FindFile(f, d["cache"], global.VoicePathOld)
-		}
 		if err != nil {
 			return nil, err
 		}
@@ -928,8 +843,6 @@ func (bot *CQBot) ToElement(t string, d map[string]string, sourceType message.So
 			if !lawful {
 				return nil, errors.New("audio type error: " + mt)
 			}
-		}
-		if !global.IsAMRorSILK(data) {
 			data, err = global.EncoderSilk(data)
 			if err != nil {
 				return nil, err
@@ -1055,6 +968,13 @@ func (bot *CQBot) ToElement(t string, d map[string]string, sourceType message.So
 			return nil, errors.New("invalid dice value " + value)
 		}
 		return message.NewDice(int32(i)), nil
+	case "rps":
+		value := d["value"]
+		i, _ := strconv.ParseInt(value, 10, 64)
+		if i < 0 || i > 2 {
+			return nil, errors.New("invalid finger-guessing value " + value)
+		}
+		return message.NewFingerGuessing(int32(i)), nil
 	case "xml":
 		resID := d["resid"]
 		template := cqcode.EscapeValue(d["data"])
@@ -1108,33 +1028,28 @@ func (bot *CQBot) ToElement(t string, d map[string]string, sourceType message.So
 		if cover, ok := d["cover"]; ok {
 			data, _ = global.FindFile(cover, d["cache"], global.ImagePath)
 		} else {
-			_ = global.ExtractCover(v.File, v.File+".jpg")
+			err = global.ExtractCover(v.File, v.File+".jpg")
+			if err != nil {
+				return nil, err
+			}
 			data, _ = os.ReadFile(v.File + ".jpg")
 		}
 		v.thumb = bytes.NewReader(data)
 		video, _ := os.Open(v.File)
 		defer video.Close()
-		_, err = video.Seek(4, io.SeekStart)
-		if err != nil {
-			return nil, err
-		}
+		_, _ = video.Seek(4, io.SeekStart)
 		header := make([]byte, 4)
-		_, err = video.Read(header)
-		if err != nil {
-			return nil, err
-		}
+		_, _ = video.Read(header)
 		if !bytes.Equal(header, []byte{0x66, 0x74, 0x79, 0x70}) { // check file header ftyp
 			_, _ = video.Seek(0, io.SeekStart)
 			hash, _ := utils.ComputeMd5AndLength(video)
 			cacheFile := path.Join(global.CachePath, hex.EncodeToString(hash)+".mp4")
-			if global.PathExists(cacheFile) && (d["cache"] == "" || d["cache"] == "1") {
-				goto ok
+			if !(d["cache"] == "" || d["cache"] == "1") || !global.PathExists(cacheFile) {
+				err = global.EncodeMP4(v.File, cacheFile)
+				if err != nil {
+					return nil, err
+				}
 			}
-			err = global.EncodeMP4(v.File, cacheFile)
-			if err != nil {
-				return nil, err
-			}
-		ok:
 			v.File = cacheFile
 		}
 		return v, nil
@@ -1200,12 +1115,19 @@ func (bot *CQBot) makeImageOrVideoElem(d map[string]string, video bool, sourceTy
 		}
 		return &LocalImageElement{File: fu.Path, URL: f}, nil
 	}
-	if strings.HasPrefix(f, "base64") && !video {
+	if !video && strings.HasPrefix(f, "base64") {
 		b, err := param.Base64DecodeString(strings.TrimPrefix(f, "base64://"))
 		if err != nil {
 			return nil, err
 		}
 		return &LocalImageElement{Stream: bytes.NewReader(b), URL: f}, nil
+	}
+	if !video && strings.HasPrefix(f, "base16384") {
+		b, err := b14.UTF82UTF16BE(utils.S2B(strings.TrimPrefix(f, "base16384://")))
+		if err != nil {
+			return nil, err
+		}
+		return &LocalImageElement{Stream: bytes.NewReader(b14.Decode(b)), URL: f}, nil
 	}
 	rawPath := path.Join(global.ImagePath, f)
 	if video {
@@ -1243,10 +1165,6 @@ func (bot *CQBot) makeImageOrVideoElem(d map[string]string, video bool, sourceTy
 		}
 	}
 	exist := global.PathExists(rawPath)
-	if !exist && global.PathExists(path.Join(global.ImagePathOld, f)) {
-		exist = true
-		rawPath = path.Join(global.ImagePathOld, f)
-	}
 	if !exist {
 		if d["url"] != "" {
 			return bot.makeImageOrVideoElem(map[string]string{"file": d["url"]}, false, sourceType)
