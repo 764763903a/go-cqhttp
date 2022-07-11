@@ -68,6 +68,8 @@ func (ev *event) MarshalJSON() ([]byte, error) {
 	return append([]byte(nil), buf.Bytes()...), nil
 }
 
+var PrivateMessageEventCallback func(uid int64, msg string)
+
 func (bot *CQBot) privateMessageEvent(_ *client.QQClient, m *message.PrivateMessage) {
 	bot.checkMedia(m.Elements, m.Sender.Uin)
 	source := message.Source{
@@ -97,6 +99,8 @@ func (bot *CQBot) privateMessageEvent(_ *client.QQClient, m *message.PrivateMess
 	}
 	bot.dispatchEvent(typ, fm)
 }
+
+var GroupMessageEventCallback func(gid int64, uid int64, msg string)
 
 func (bot *CQBot) groupMessageEvent(c *client.QQClient, m *message.GroupMessage) {
 	bot.checkMedia(m.Elements, m.GroupCode)
