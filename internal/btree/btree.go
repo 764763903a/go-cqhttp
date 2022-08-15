@@ -487,8 +487,9 @@ func (d *DB) Insert(chash *byte, data []byte) {
 	/* SHA-1 must be in writable memory */
 	var hash [hashSize]byte
 	copyhash(&hash[0], chash)
-
-	_ = d.insertTopLevel(&d.top, &hash[0], data, len(data))
+	if d != nil {
+		_ = d.insertTopLevel(&d.top, &hash[0], data, len(data))
+	}
 	freeQueued(d)
 	d.flushSuper()
 }
