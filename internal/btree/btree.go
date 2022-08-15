@@ -489,9 +489,9 @@ func (d *DB) Insert(chash *byte, data []byte) {
 	copyhash(&hash[0], chash)
 	if d != nil {
 		_ = d.insertTopLevel(&d.top, &hash[0], data, len(data))
+		freeQueued(d)
+		d.flushSuper()
 	}
-	freeQueued(d)
-	d.flushSuper()
 }
 
 func (d *DB) readValue(off int64) []byte {
