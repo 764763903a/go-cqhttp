@@ -582,7 +582,6 @@ func (bot *CQBot) event(typ string, others global.MSG) *event {
 }
 
 func (bot *CQBot) dispatchEvent(typ string, others global.MSG) {
-
 	bot.dispatch(bot.event(typ, others))
 }
 
